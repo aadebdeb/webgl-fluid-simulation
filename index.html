@@ -1,0 +1,723 @@
+<!DOCTYPE html>
+<html lang="ja">
+  <head>
+    <title>Fluid Simulation by WebGL</title>
+    <style>
+      body {
+        margin: 0;
+        overflow: hidden;
+      }
+    </style>
+  </head>
+  <body>
+    <canvas id="canvas"></canvas>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/dat-gui/0.6.5/dat.gui.min.js"></script>
+    <script id="vertex-shader" type="x-shader/x-vertex">
+      attribute vec3 aPosition;
+
+      void main() {
+        gl_Position = vec4(aPosition, 1.0);
+      }
+    </script>
+    <script id="initial-velocity-shader" type="x-shader/x-fragment">
+      precision mediump float;
+
+      void main() {
+        gl_FragColor = vec4(0.0);
+      }
+    </script>
+    <script id="initial-density-shader" type="x-shader/x-fragment">
+      precision mediump float;
+
+      uniform vec2 uResolution;
+
+      void main() {
+        vec2 st = (2.0 * gl_FragCoord.xy - uResolution) / uResolution.y;
+
+        vec3 rgb = vec3(0.0);
+        float dis = 0.2;
+        float ra = 0.4;
+        vec2 rc = vec2(0.0, dis);
+        vec2 gc = vec2(dis * 0.866, -dis * 0.5);
+        vec2 bc = vec2(-dis * 0.866, -dis * 0.5);
+        rgb.r = 1.0 - smoothstep(ra - 0.01, ra + 0.01, length(rc - st));
+        rgb.g = 1.0 - smoothstep(ra - 0.01, ra + 0.01, length(gc - st));
+        rgb.b = 1.0 - smoothstep(ra - 0.01, ra + 0.01, length(bc - st));
+        gl_FragColor = vec4(rgb, 0.0);
+      }
+    </script>
+    <script id="add-velocity-shader" type="x-shader/x-fragment">
+      precision mediump float;
+
+      uniform sampler2D uTexture;
+      uniform vec2 uMouse;
+      uniform vec2 uPrevMouse;
+      uniform bool uMousePressed;
+      uniform vec2 uResolution;
+      uniform float uAddRadius;
+      uniform float uAddIntensity;
+      uniform float uDeltaTime;
+
+      vec3 tex(vec2 p, vec2 scale) {
+        return texture2D(uTexture, p  * scale).rgb;
+      }
+
+      void main() {
+        vec2 scale = 1.0 / uResolution;
+        vec2 p = gl_FragCoord.xy / uResolution;
+        vec2 m = uMouse / uResolution;
+        vec2 pm = uPrevMouse / uResolution;
+        if (length(m - pm) > 0.001 && uMousePressed) {
+          vec2 mdir = normalize(m - pm);
+          float len = uAddIntensity * clamp(uAddRadius - length(p - m), 0.0, uAddRadius) / uAddRadius;
+          gl_FragColor = vec4(tex(gl_FragCoord.xy, scale).xy + uDeltaTime * len * mdir, 0.0, 0.0);
+        } else {
+          gl_FragColor = vec4(tex(gl_FragCoord.xy, scale).xy, 0.0, 0.0);
+        }
+      }
+    </script>
+    <script id="diffusion-shader" type="x-shader/x-fragment">
+      precision mediump float;
+
+      uniform sampler2D uTexture;
+      uniform vec2 uResolution;
+      uniform float uDeltaTime;
+      uniform float uDiffusion;
+
+      vec3 tex(vec2 p, vec2 scale) {
+        return texture2D(uTexture, p  * scale).rgb;
+      }
+
+      void main() {
+        float a = uDeltaTime * uDiffusion * uResolution.x * uResolution.y;
+        vec2 scale = 1.0 / uResolution;
+        vec3 v = tex(gl_FragCoord.xy, scale);
+        vec3 sum = vec3(0.0);
+        sum += tex(gl_FragCoord.xy + vec2(1.0, 0.0), scale);
+        sum += tex(gl_FragCoord.xy + vec2(-1.0, 0.0), scale);
+        sum += tex(gl_FragCoord.xy + vec2(0.0, 1.0), scale);
+        sum += tex(gl_FragCoord.xy + vec2(0.0, -1.0), scale);
+
+        v = (v + a * sum) / (1.0 + 4.0 * a);
+
+        gl_FragColor = vec4(v, 0.0);
+      }
+    </script>
+    <script id="advection-shader" type="x-shader/x-fragment">
+      precision mediump float;
+
+      uniform sampler2D uTargetTexture;
+      uniform sampler2D uVelocityTexture;
+      uniform vec2 uResolution;
+      uniform float uDeltaTime;
+
+      vec3 tex(sampler2D texture, vec2 p, vec2 scale) {
+        return texture2D(texture, p * scale).rgb;
+      }
+
+      void main() {
+        vec2 dt = uDeltaTime * uResolution;
+        vec2 scale = 1.0 / uResolution;
+        vec2 v = tex(uVelocityTexture, gl_FragCoord.xy, scale).xy;
+        float x = gl_FragCoord.x - dt.x * v.x - 0.5;
+        float y = gl_FragCoord.y - dt.y * v.y - 0.5;
+
+        float x0 = floor(x);
+        float x1 = x0 + 1.0;
+        float y0 = floor(y);
+        float y1 = y0 + 1.0;
+        vec3 t00 = tex(uTargetTexture, vec2(x0, y0), scale);
+        vec3 t10 = tex(uTargetTexture, vec2(x1, y0), scale);
+        vec3 t01 = tex(uTargetTexture, vec2(x0, y1), scale);
+        vec3 t11 = tex(uTargetTexture, vec2(x1, y1), scale);
+        float mx = fract(x);
+        float my = fract(y);
+        vec3 t = mix(mix(t00, t10, mx), mix(t10, t11, mx), my);
+        gl_FragColor = vec4(t, 0.0);
+      }
+    </script>
+    <script id="projection-shader" type="x-shader/x-fragment">
+      precision mediump float;
+
+      void main() {
+        gl_FragColor = vec4(0.0);
+      }
+    </script>
+    <script id="projection1-shader" type="x-shader/x-fragment">
+      precision mediump float;
+
+      uniform sampler2D uTexture;
+      uniform vec2 uResolution;
+
+      vec3 tex(vec2 p, vec2 scale) {
+        return texture2D(uTexture, p  * scale).rgb;
+      }
+
+      void main() {
+        vec2 scale = 1.0 / uResolution;
+        vec2 h = 1.0 / uResolution;
+        float x = -0.5 * ((h.x * (tex(gl_FragCoord.xy + vec2(1.0, 0.0), scale).x
+                               - tex(gl_FragCoord.xy + vec2(-1.0, 0.0), scale).x))
+                       + (h.y * (tex(gl_FragCoord.xy + vec2(0.0, 1.0), scale).y
+                               - tex(gl_FragCoord.xy + vec2(0.0, -1.0), scale).y)));
+        float y = 0.0;
+        gl_FragColor = vec4(x, y, 0.0, 0.0);
+      }
+    </script>
+    <script id="projection2-shader" type="x-shader/x-fragment">
+      precision mediump float;
+
+      uniform sampler2D uTexture;
+      uniform vec2 uResolution;
+
+      vec3 tex(vec2 p, vec2 scale) {
+        return texture2D(uTexture, p  * scale).rgb;
+      }
+
+      void main() {
+        vec2 scale = 1.0 / uResolution;
+        float x = tex(gl_FragCoord.xy, scale).x;
+        float y = (x + tex(gl_FragCoord.xy + vec2(1.0, 0.0), scale).y
+                     + tex(gl_FragCoord.xy + vec2(-1.0, 0.0), scale).y
+                     + tex(gl_FragCoord.xy + vec2(0.0, 1.0), scale).y
+                     + tex(gl_FragCoord.xy + vec2(0.0, -1.0), scale).y) / 4.0;
+        gl_FragColor = vec4(x, y, 0.0, 0.0);
+      }
+    </script>
+    <script id="projection3-shader" type="x-shader/x-fragment">
+      precision mediump float;
+
+      uniform sampler2D uVelocityTexture;
+      uniform sampler2D uGradientTexture;
+      uniform vec2 uResolution;
+
+      vec3 tex(sampler2D texture, vec2 p, vec2 scale) {
+        return texture2D(texture, p * scale).rgb;
+      }
+
+      void main() {
+        vec2 scale = 1.0 / uResolution;
+        vec2 h = 1.0 / uResolution;
+        float x = tex(uVelocityTexture, gl_FragCoord.xy, scale).x
+                  -0.5 * (tex(uGradientTexture, gl_FragCoord.xy + vec2(1.0, 0.0), scale).y
+                        - tex(uGradientTexture, gl_FragCoord.xy + vec2(-1.0, 0.0), scale).y) / h.x;
+        float y = tex(uVelocityTexture, gl_FragCoord.xy, scale).y
+                  -0.5 * (tex(uGradientTexture, gl_FragCoord.xy + vec2(0.0, 1.0), scale).y
+                        - tex(uGradientTexture, gl_FragCoord.xy + vec2(0.0, -1.0), scale).y) / h.y;
+        gl_FragColor = vec4(x, y, 0.0, 0.0);
+      }
+    </script>
+    <script id="render-shader" type="x-shader/x-fragment">
+      precision mediump float;
+
+      uniform sampler2D uTexture;
+      uniform vec2 uResolution;
+
+      void main() {
+        gl_FragColor = vec4(texture2D(uTexture, gl_FragCoord.xy / uResolution).rgb, 1.0);
+      }
+    </script>
+    <script id="render-velocity-shader" type="x-shader/x-fragment">
+      precision mediump float;
+
+      #define PI 3.14159265359
+
+      uniform sampler2D uTexture;
+      uniform vec2 uResolution;
+
+      vec3 hsv2rgb(float h, float s, float v) {
+        h = mod(h, 360.0);
+        if (s == 0.0) {
+          return vec3(0.0, 0.0, 0.0);
+        }
+        float c = v * s;
+        float i = h / 60.0;
+        float x = c * (1.0 - abs(mod(i, 2.0) - 1.0));
+        return vec3(v - c) + (i < 1.0 ? vec3(c, x, 0.0) :
+                              i < 2.0 ? vec3(x, c, 0.0) :
+                              i < 3.0 ? vec3(0.0, c, x) :
+                              i < 4.0 ? vec3(0.0, x, c) :
+                              i < 5.0 ? vec3(x, 0.0, c) :
+                                        vec3(c, 0.0, x));
+       }
+
+      void main() {
+        vec2 p = texture2D(uTexture, gl_FragCoord.xy / uResolution).xy;
+        float theta = atan(p.y, p.x) + PI;
+        float h = theta * 180.0 / PI;
+        float speed = length(p);
+        float v = clamp(speed * 10.0, 0.0, 1.0);
+        gl_FragColor = vec4(hsv2rgb(h, 1.0, v), 1.0);
+      }
+    </script>
+    <script>
+
+      // creates a shader
+      // @param [WebGLRenderingContext] gl
+      // @param [String] id - id of a element which has shader source
+      // @return [WebGLShader]
+      function createShader(gl, id) {
+        const elem = document.getElementById(id);
+        if (!elem) {
+          throw new Error('Can not find element "'  + id + '"')
+        }
+
+        const type = elem.type === 'x-shader/x-vertex' ? gl.VERTEX_SHADER :
+                     elem.type === 'x-shader/x-fragment' ? gl.FRAGMENT_SHADER : null;
+        if (!type) {
+          throw new Error('Can not math shader type"' + elem.type + '"')
+        }
+
+        const shader = gl.createShader(type);
+        gl.shaderSource(shader, elem.text);
+        gl.compileShader(shader);
+
+        if (!gl.getShaderParameter(shader, gl.COMPILE_STATUS)) {
+          throw new Error('Can not compile shader sourde (' + gl.getShaderInfoLog(shader) + ')');
+        }
+
+        return shader;
+      }
+
+      // creates a program
+      // @param [WebGLRenderingContext] gl
+      // @param [WebGLShader] vertexShader
+      // @param [WebGLShader] fragmentShader
+      // @return [WebGLProgram]
+      function createProgram(gl, vertexShader, fragmentShader) {
+        const program = gl.createProgram();
+
+        gl.attachShader(program, vertexShader);
+        gl.attachShader(program, fragmentShader);
+
+        gl.linkProgram(program);
+        if (!gl.getProgramParameter(program, gl.LINK_STATUS)) {
+          throw new Error('Can not link program(' + gl.getProgramParameter(program) + ')');
+        }
+
+        return program;
+      }
+
+      // creates an array buffer
+      // @param [WebGLRenderingContext] gl
+      // @param [Array<Number>] array
+      // @param [WebGLBuffer]
+      function createArrayBuffer(gl, array) {
+        const buffer = gl.createBuffer();
+        gl.bindBuffer(gl.ARRAY_BUFFER, buffer);
+        gl.bufferData(gl.ARRAY_BUFFER, new Float32Array(array), gl.STATIC_DRAW);
+        gl.bindBuffer(gl.ARRAY_BUFFER, null);
+        return buffer;
+      }
+
+      // sets attributes
+      // @param [WebGLRenderingContext] gl
+      // @param [Object] attributes
+      function setAttributes(gl, attributes) {
+        Object.keys(attributes).forEach((name) => {
+          const attribute = attributes[name];
+          gl.bindBuffer(gl.ARRAY_BUFFER, attribute.buffer);
+          gl.enableVertexAttribArray(attribute.location);
+          gl.vertexAttribPointer(attribute.location, attribute.size, gl.FLOAT, false, 0, 0);
+        });
+        gl.bindBuffer(gl.ARRAY_BUFFER, null);
+      }
+
+      // creates a framebuffer
+      // @param [WebGLRenderingContext] gl
+      // @param [Number] width
+      // @param [Number] height
+      // @return [Object]
+      function createFrameBuffer(gl, width, height) {
+        const frameBuffer = gl.createFramebuffer(),
+              texture = gl.createTexture();
+
+        gl.bindFramebuffer(gl.FRAMEBUFFER, frameBuffer);
+
+        gl.activeTexture(gl.TEXTURE0);
+        gl.bindTexture(gl.TEXTURE_2D, texture);
+        gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, width, height, 0, gl.RGBA, gl.FLOAT, null);
+        gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.NEAREST);
+        gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.NEAREST);
+        gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+        gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+        gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, texture, 0);
+
+        gl.bindTexture(gl.TEXTURE_2D, null);
+        gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+
+        return {
+          frameBuffer: frameBuffer,
+          texture: texture
+        };
+      }
+
+      document.addEventListener('DOMContentLoaded', function() {
+
+        const canvas = document.getElementById('canvas');
+        canvas.width = window.innerWidth;
+        canvas.height = window.innerHeight;
+
+        let mousePosition = [0, 0];
+        let prevMousePosition = [0, 0];
+        let mousePressed = false;
+        canvas.addEventListener('mousemove', (e) => {
+          prevMousePosition = mousePosition;
+          mousePosition = [e.clientX, canvas.height - e.clientY];
+        });
+        canvas.addEventListener('mousedown', () => {
+          mousePressed = true;
+        });
+        canvas.addEventListener('mouseup', () => {
+          mousePressed = false;
+        });
+
+        const gl = canvas.getContext('webgl');
+
+        if (gl.getExtension('OES_texture_float') == null) {
+          throw new Error('Can not use float texture.');
+        }
+
+        const vertexShader = createShader(gl, 'vertex-shader');
+        const initialVelocityShader = createShader(gl, 'initial-velocity-shader');
+        const initialDensityShader = createShader(gl, 'initial-density-shader');
+        const addVelocityShader = createShader(gl, 'add-velocity-shader');
+        const diffusionShader = createShader(gl, 'diffusion-shader');
+        const advectionShader = createShader(gl, 'advection-shader');
+        const projectionShader = createShader(gl, 'projection-shader');
+        const projection1Shader = createShader(gl, 'projection1-shader');
+        const projection2Shader = createShader(gl, 'projection2-shader');
+        const projection3Shader = createShader(gl, 'projection3-shader');
+        const renderShader = createShader(gl, 'render-shader');
+        const renderVelocityShader = createShader(gl, 'render-velocity-shader');
+
+        const initialVelocityProgram = createProgram(gl, vertexShader, initialVelocityShader);
+        const initialDensityProgram = createProgram(gl, vertexShader, initialDensityShader);
+        const addVelocityProgram = createProgram(gl, vertexShader, addVelocityShader);
+        const diffusionProgram = createProgram(gl, vertexShader, diffusionShader);
+        const advectionProgram = createProgram(gl, vertexShader, advectionShader);
+        const projectionProgram = createProgram(gl, vertexShader, projectionShader);
+        const projection1Program = createProgram(gl, vertexShader, projection1Shader);
+        const projection2Program = createProgram(gl, vertexShader, projection2Shader);
+        const projection3Program = createProgram(gl, vertexShader, projection3Shader);
+        const renderProgram = createProgram(gl, vertexShader, renderShader);
+        const renderVelocityProgram = createProgram(gl, vertexShader, renderVelocityShader);
+
+        const position = [
+          -1.0,  1.0,  0.0,
+          -1.0, -1.0,  0.0,
+           1.0,  1.0,  0.0,
+           1.0, -1.0,  0.0
+        ];
+        const positionBuffer = createArrayBuffer(gl, position);
+
+        let prevVelocityFrameBufferObj = createFrameBuffer(gl, canvas.width, canvas.height);
+        let nextVelocityFrameBufferObj = createFrameBuffer(gl, canvas.width, canvas.height);
+        let prevDensityFrameBufferObj = createFrameBuffer(gl, canvas.width, canvas.height);
+        let nextDensityFrameBufferObj = createFrameBuffer(gl, canvas.width, canvas.height);
+        let projectionFrameBufferObj1 = createFrameBuffer(gl, canvas.width, canvas.height);
+        let projectionFrameBufferObj2 = createFrameBuffer(gl, canvas.width, canvas.height);
+
+        const init = function() {
+          gl.useProgram(initialVelocityProgram);
+          gl.bindFramebuffer(gl.FRAMEBUFFER, prevVelocityFrameBufferObj.frameBuffer);
+          gl.viewport(0, 0, canvas.width, canvas.height);
+          gl.clearColor(0.0, 0.0, 0.0, 1.0);
+          setAttributes(gl, {
+            aPosition: {
+              location: gl.getAttribLocation(initialVelocityProgram, 'aPosition'),
+              size: 3,
+              buffer: positionBuffer
+            }
+          });
+          gl.clear(gl.COLOR_BUFFER_BIT);
+          gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
+          gl.flush();
+
+          gl.useProgram(initialDensityProgram);
+          gl.bindFramebuffer(gl.FRAMEBUFFER, prevDensityFrameBufferObj.frameBuffer);
+          gl.viewport(0, 0, canvas.width, canvas.height);
+          gl.clearColor(1.0, 0.0, 0.0, 1.0);
+          setAttributes(gl, {
+            aPosition: {
+              location: gl.getAttribLocation(initialDensityProgram, 'aPosition'),
+              size: 3,
+              buffer: positionBuffer
+            }
+          });
+          gl.uniform2fv(gl.getUniformLocation(initialDensityProgram, 'uResolution'), [canvas.width, canvas.height]);
+          gl.clear(gl.COLOR_BUFFER_BIT);
+          gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
+          gl.flush();
+        }
+
+        const addVelocity = function(prevFrameBufferObj, nextFrameBufferObj, program, mouse, radius, intensity, deltaTime) {
+          gl.useProgram(program);
+          gl.bindFramebuffer(gl.FRAMEBUFFER, nextFrameBufferObj.frameBuffer);
+          gl.viewport(0, 0, canvas.width, canvas.height);
+          gl.clearColor(0.0, 0.0, 0.0, 1.0);
+          gl.activeTexture(gl.TEXTURE0);
+          gl.bindTexture(gl.TEXTURE_2D, prevFrameBufferObj.texture);
+
+          setAttributes(gl, {
+            aPosition: {
+              location: gl.getAttribLocation(program, 'aPosition'),
+              size: 3,
+              buffer: positionBuffer
+            }
+          });
+          gl.uniform1i(gl.getUniformLocation(program, 'uTexture'), 0);
+          gl.uniform2fv(gl.getUniformLocation(program, 'uResolution'), [canvas.width, canvas.height]);
+          gl.uniform1i(gl.getUniformLocation(program, 'uMousePressed'), mouse.pressed);
+          gl.uniform2fv(gl.getUniformLocation(program, 'uMouse'), mouse.position);
+          gl.uniform2fv(gl.getUniformLocation(program, 'uPrevMouse'), mouse.prevPosition);
+          gl.uniform1f(gl.getUniformLocation(program, 'uAddRadius'), radius);
+          gl.uniform1f(gl.getUniformLocation(program, 'uAddIntensity'), intensity);
+          gl.uniform1f(gl.getUniformLocation(program, 'uDeltaTime'), deltaTime);
+          gl.clear(gl.COLOR_BUFFER_BIT);
+          gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
+          gl.flush();
+        }
+
+        const diffuse = function(prevFrameBufferObj, nextFrameBufferObj, diffusion, deltaTime) {
+          for (let i = 0; i < 20; i++) {
+            gl.useProgram(diffusionProgram);
+            gl.bindFramebuffer(gl.FRAMEBUFFER, nextFrameBufferObj.frameBuffer);
+            gl.viewport(0, 0, canvas.width, canvas.height);
+            gl.clearColor(0.0, 0.0, 0.0, 1.0);
+            gl.activeTexture(gl.TEXTURE0);
+            gl.bindTexture(gl.TEXTURE_2D, prevFrameBufferObj.texture);
+            setAttributes(gl, {
+              aPosition: {
+                location: gl.getAttribLocation(diffusionProgram, 'aPosition'),
+                size: 3,
+                buffer: positionBuffer
+              }
+            });
+            gl.uniform1i(gl.getUniformLocation(diffusionProgram, 'uTexture'), 0);
+            gl.uniform2fv(gl.getUniformLocation(diffusionProgram, 'uResolution'), [canvas.width, canvas.height]);
+            gl.uniform1f(gl.getUniformLocation(diffusionProgram, 'uDiffusion'), diffusion);
+            gl.uniform1f(gl.getUniformLocation(diffusionProgram, 'uDeltaTime'), deltaTime);
+            gl.clear(gl.COLOR_BUFFER_BIT);
+            gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
+            gl.flush();
+
+            let tmp = prevFrameBufferObj;
+            prevFrameBufferObj = nextFrameBufferObj;
+            nextFrameBufferObj = tmp;
+          }
+        };
+
+        const advect = function(prevFrameBufferObj, nextFrameBufferObj, velocityTexture, deltaTime) {
+          gl.useProgram(advectionProgram);
+          gl.bindFramebuffer(gl.FRAMEBUFFER, nextFrameBufferObj.frameBuffer);
+          gl.viewport(0, 0, canvas.width, canvas.height);
+          gl.clearColor(0.0, 0.0, 0.0, 1.0);
+          gl.activeTexture(gl.TEXTURE0);
+          gl.bindTexture(gl.TEXTURE_2D, prevFrameBufferObj.texture);
+          gl.activeTexture(gl.TEXTURE1);
+          gl.bindTexture(gl.TEXTURE_2D, velocityTexture);
+          setAttributes(gl, {
+            aPosition: {
+              location: gl.getAttribLocation(advectionProgram, 'aPosition'),
+              size: 3,
+              buffer: positionBuffer
+            }
+          });
+          gl.uniform1i(gl.getUniformLocation(advectionProgram, 'uTargetTexture'), 0);
+          gl.uniform1i(gl.getUniformLocation(advectionProgram, 'uVelocityTexture'), 1);
+          gl.uniform2fv(gl.getUniformLocation(advectionProgram, 'uResolution'), [canvas.width, canvas.height]);
+          gl.uniform1f(gl.getUniformLocation(advectionProgram, 'uDeltaTime'), deltaTime);
+          gl.clear(gl.COLOR_BUFFER_BIT);
+          gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
+          gl.flush();
+        };
+
+        const project = function(prevFrameBufferObj, nextFrameBufferObj) {
+          gl.useProgram(projection1Program);
+          gl.bindFramebuffer(gl.FRAMEBUFFER, projectionFrameBufferObj1.frameBuffer);
+          gl.viewport(0, 0, canvas.width, canvas.height);
+          gl.clearColor(0.0, 0.0, 0.0, 1.0);
+          gl.activeTexture(gl.TEXTURE0);
+          gl.bindTexture(gl.TEXTURE_2D, prevFrameBufferObj.texture);
+          setAttributes(gl, {
+            aPosition: {
+              location: gl.getAttribLocation(projection1Program, 'aPosition'),
+              size: 3,
+              buffer: positionBuffer
+            }
+          });
+          gl.uniform1i(gl.getUniformLocation(projection1Program, 'uTexture'), 0);
+          gl.uniform2fv(gl.getUniformLocation(projection1Program, 'uResolution'), [canvas.width, canvas.height]);
+          gl.clear(gl.COLOR_BUFFER_BIT);
+          gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
+          gl.flush();
+
+          for (let i = 0; i < 20; i++) {
+            gl.useProgram(projection2Program);
+            gl.bindFramebuffer(gl.FRAMEBUFFER, projectionFrameBufferObj2.frameBuffer);
+            gl.viewport(0, 0, canvas.width, canvas.height);
+            gl.clearColor(0.0, 0.0, 0.0, 1.0);
+            gl.activeTexture(gl.TEXTURE0);
+            gl.bindTexture(gl.TEXTURE_2D, projectionFrameBufferObj1.texture);
+            setAttributes(gl, {
+              aPosition: {
+                location: gl.getAttribLocation(projection2Program, 'aPosition'),
+                size: 3,
+                buffer: positionBuffer
+              }
+            });
+            gl.uniform1i(gl.getUniformLocation(projection2Program, 'uTexture'), 0);
+            gl.uniform2fv(gl.getUniformLocation(projection2Program, 'uResolution'), [canvas.width, canvas.height]);
+            gl.clear(gl.COLOR_BUFFER_BIT);
+            gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
+            gl.flush();
+
+            let tmp = projectionFrameBufferObj1;
+            projectionFrameBufferObj1 = projectionFrameBufferObj2;
+            projectionFrameBufferObj2 = tmp;
+          }
+
+          gl.useProgram(projection3Program);
+          gl.bindFramebuffer(gl.FRAMEBUFFER, nextFrameBufferObj.frameBuffer);
+          gl.viewport(0, 0, canvas.width, canvas.height);
+          gl.clearColor(0.0, 0.0, 0.0, 1.0);
+          gl.activeTexture(gl.TEXTURE0);
+          gl.bindTexture(gl.TEXTURE_2D, prevFrameBufferObj.texture);
+          gl.activeTexture(gl.TEXTURE1);
+          gl.bindTexture(gl.TEXTURE_2D, projectionFrameBufferObj1.texture);
+          setAttributes(gl, {
+            aPosition: {
+              location: gl.getAttribLocation(projection3Program, 'aPosition'),
+              size: 3,
+              buffer: positionBuffer
+            }
+          });
+          gl.uniform1i(gl.getUniformLocation(projection3Program, 'uVelocityTexture'), 0);
+          gl.uniform1i(gl.getUniformLocation(projection3Program, 'uGradientTexture'), 1);
+          gl.uniform2fv(gl.getUniformLocation(projection3Program, 'uResolution'), [canvas.width, canvas.height]);
+          gl.clear(gl.COLOR_BUFFER_BIT);
+          gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
+          gl.flush();
+
+        };
+
+        const renderVelocity = function() {
+          gl.useProgram(renderVelocityProgram);
+          gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+          gl.viewport(0, 0, canvas.width, canvas.height);
+          gl.clearColor(0.0, 0.0, 0.0, 1.0);
+          gl.activeTexture(gl.TEXTURE0);
+          gl.bindTexture(gl.TEXTURE_2D, nextVelocityFrameBufferObj.texture);
+          setAttributes(gl, {
+            aPosition: {
+              location: gl.getAttribLocation(renderVelocityProgram, 'aPosition'),
+              size: 3,
+              buffer: positionBuffer
+            }
+          });
+          gl.uniform1i(gl.getUniformLocation(renderVelocityProgram, 'uTexture'), 0);
+          gl.uniform2fv(gl.getUniformLocation(renderVelocityProgram, 'uResolution'), [canvas.width, canvas.height]);
+          gl.clear(gl.COLOR_BUFFER_BIT);
+          gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
+          gl.flush();
+        }
+
+        const renderDensity = function() {
+          gl.useProgram(renderProgram);
+          gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+          gl.viewport(0, 0, canvas.width, canvas.height);
+          gl.clearColor(0.0, 0.0, 0.0, 1.0);
+          gl.activeTexture(gl.TEXTURE0);
+          gl.bindTexture(gl.TEXTURE_2D, nextDensityFrameBufferObj.texture);
+          setAttributes(gl, {
+            aPosition: {
+              location: gl.getAttribLocation(renderProgram, 'aPosition'),
+              size: 3,
+              buffer: positionBuffer
+            }
+          });
+          gl.uniform1i(gl.getUniformLocation(renderProgram, 'uTexture'), 0);
+          gl.uniform2fv(gl.getUniformLocation(renderProgram, 'uResolution'), [canvas.width, canvas.height]);
+          gl.clear(gl.COLOR_BUFFER_BIT);
+          gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
+          gl.flush();
+        }
+
+        const swapVelocityFrameBufferObj = function() {
+          let tmp = prevVelocityFrameBufferObj;
+          prevVelocityFrameBufferObj = nextVelocityFrameBufferObj;
+          nextVelocityFrameBufferObj = tmp;
+        };
+
+        const swapDensityFrameBufferObj = function() {
+          let tmp = prevDensityFrameBufferObj;
+          prevDensityFrameBufferObj = nextDensityFrameBufferObj;
+          nextDensityFrameBufferObj = tmp;
+        }
+
+        const props = {
+          diffusion: 0.1,
+          viscocity: 0.1,
+          addRadius: 0.05,
+          addIntensity: 2.5,
+          render: 'density',
+          initialize: init
+        };
+        const gui = new dat.GUI();
+        gui.add(props, 'diffusion', 0.0, 1.0);
+        gui.add(props, 'viscocity', 0.0, 1.0);
+        gui.add(props, 'addRadius', 0.01, 0.1);
+        gui.add(props, 'addIntensity', 0.0, 5.0);
+        gui.add(props, 'render', ['density', 'velocity']);
+        gui.add(props, 'initialize');
+
+        init();
+
+        let time = prevTime = new Date();
+        let timestep = 0.0;
+
+        const render = () => {
+          const mouse = {
+            pressed: mousePressed,
+            position: mousePosition,
+            prevPosition: prevMousePosition,
+          };
+          prevTime = time;
+          time = new Date();
+          const dt = Math.min((time - prevTime) * 0.001, 1.0);
+
+          // update velocity
+          addVelocity(prevVelocityFrameBufferObj, nextVelocityFrameBufferObj, addVelocityProgram, mouse, props.addRadius, props.addIntensity, dt);
+          swapVelocityFrameBufferObj();
+          diffuse(prevVelocityFrameBufferObj, nextVelocityFrameBufferObj, props.viscocity, dt);
+          swapVelocityFrameBufferObj();
+          project(prevVelocityFrameBufferObj, nextVelocityFrameBufferObj);
+          swapVelocityFrameBufferObj();
+          advect(prevVelocityFrameBufferObj, nextVelocityFrameBufferObj, prevVelocityFrameBufferObj.texture, dt);
+          swapVelocityFrameBufferObj();
+          project(prevVelocityFrameBufferObj, nextVelocityFrameBufferObj);
+
+          // update density
+          diffuse(prevDensityFrameBufferObj, nextDensityFrameBufferObj, props.diffusion, dt);
+          swapDensityFrameBufferObj();
+          advect(prevDensityFrameBufferObj, nextDensityFrameBufferObj, nextVelocityFrameBufferObj.texture, dt);
+
+          if (props.render === 'velocity') {
+            renderVelocity();
+          } else {
+            renderDensity();
+          }
+
+          swapVelocityFrameBufferObj();
+          swapDensityFrameBufferObj();
+
+          requestAnimationFrame(render);
+        };
+
+        requestAnimationFrame(render);
+      });
+    </script>
+  </body>
+
+</html>
